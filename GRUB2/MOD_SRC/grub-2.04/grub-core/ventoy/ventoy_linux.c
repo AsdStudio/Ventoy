@@ -686,6 +686,8 @@ static grub_uint32_t ventoy_linux_get_override_chunk_size(void)
 static void ventoy_linux_fill_override_data(    grub_uint64_t isosize, void *override)
 {
     initrd_info *node;
+    grub_uint32_t mod;
+    grub_uint32_t newlen;
     grub_uint64_t sector;
     ventoy_override_chunk *cur;
 
@@ -699,13 +701,20 @@ static void ventoy_linux_fill_override_data(    grub_uint64_t isosize, void *ove
             continue;
         }
 
+        newlen = (grub_uint32_t)(node->size + g_ventoy_cpio_size);
+        mod = newlen % 4; 
+        if (mod > 0)
+        {
+            newlen += 4 - mod;
+        }
+
         if (node->iso_type == 0)
         {
             ventoy_iso9660_override *dirent = (ventoy_iso9660_override *)node->override_data;
 
             node->override_length   = sizeof(ventoy_iso9660_override);
             dirent->first_sector    = (grub_uint32_t)sector;
-            dirent->size            = (grub_uint32_t)(node->size + g_ventoy_cpio_size);
+            dirent->size            = newlen;
             dirent->first_sector_be = grub_swap_bytes32(dirent->first_sector);
             dirent->size_be         = grub_swap_bytes32(dirent->size);
 
@@ -716,7 +725,7 @@ static void ventoy_linux_fill_override_data(    grub_uint64_t isosize, void *ove
             ventoy_udf_override *udf = (ventoy_udf_override *)node->override_data;
             
             node->override_length = sizeof(ventoy_udf_override);
-            udf->length   = (grub_uint32_t)(node->size + g_ventoy_cpio_size);
+            udf->length   = newlen;
             udf->position = (grub_uint32_t)sector - node->udf_start_block;
 
             sector += (udf->length + 2047) / 2048;
@@ -832,6 +841,50 @@ static grub_err_t ventoy_linux_locate_initrd(int filt, int *filtcnt)
 }
 
 
+grub_err_t ventoy_cmd_linux_get_main_initrd_index(grub_extcmd_context_t ctxt, int argc, char **args)
+{
+    int index = 0;
+    char buf[32];
+    initrd_info *node = NULL;
+    
+    (void)ctxt;
+    (void)argc;
+    (void)args;
+
+    if (argc != 1)
+    {
+        return 1;
+    }
+
+    if (g_initrd_img_count == 1)
+    {
+        ventoy_set_env(args[0], "0");
+        VENTOY_CMD_RETURN(GRUB_ERR_NONE);
+    }
+
+    for (node = g_initrd_img_list; node; node = node->next)
+    {
+        if (node->size <= 0)
+        {
+            continue;
+        }
+    
+        if (grub_strstr(node->name, "ucode") || grub_strstr(node->name, "-firmware"))
+        {
+            index++;
+            continue;
+        }
+
+        grub_snprintf(buf, sizeof(buf), "%d", index);
+        ventoy_set_env(args[0], buf);
+        break;
+    }
+
+    debug("main initrd index:%d\n", index);
+
+    VENTOY_CMD_RETURN(GRUB_ERR_NONE);
+}
+
 grub_err_t ventoy_cmd_linux_locate_initrd(grub_extcmd_context_t ctxt, int argc, char **args)
 {
     int sizefilt = 0;
@@ -896,14 +949,14 @@ grub_err_t ventoy_cmd_load_cpio(grub_extcmd_context_t ctxt, int argc, char **arg
         g_ventoy_cpio_size = 0;
     }
 
-    rc = ventoy_plugin_get_persistent_chunklist(args[1], &chunk_list);
+    rc = ventoy_plugin_get_persistent_chunklist(args[1], -1, &chunk_list);
     if (rc == 0 && chunk_list.cur_chunk > 0 && chunk_list.chunk)
     {
         persistent_size = chunk_list.cur_chunk * sizeof(ventoy_img_chunk);
         persistent_buf = (char *)(chunk_list.chunk);
     }
 
-    template_file = ventoy_plugin_get_install_template(args[1]);
+    template_file = ventoy_plugin_get_cur_install_template(args[1]);
     if (template_file)
     {
         debug("auto install template: <%s>\n", template_file);
@@ -924,6 +977,10 @@ grub_err_t ventoy_cmd_load_cpio(grub_extcmd_context_t ctxt, int argc, char **arg
         {
             debug("Failed to open install script %s%s\n", args[2], template_file);
         }
+    }
+    else
+    {
+        debug("auto install script skipped or not configed %s\n", args[1]);
     }
 
     g_ventoy_cpio_buf = grub_malloc(file->size + 4096 + template_size + persistent_size + img_chunk_size);
@@ -1087,6 +1144,7 @@ grub_err_t ventoy_cmd_linux_chain_data(grub_extcmd_context_t ctxt, int argc, cha
     grub_memset(chain, 0, sizeof(ventoy_chain_head));
 
     /* part 1: os parameter */
+    g_ventoy_chain_type = 0;
     ventoy_fill_os_param(file, &(chain->os_param));
 
     /* part 2: chain head */
